@@ -1,6 +1,5 @@
 data/SpeechCommands/
 data/*.tar.gz
-checkpoints/*.pt
 results/*.json
 plots/
 __pycache__/
