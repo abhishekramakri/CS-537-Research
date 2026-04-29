@@ -149,7 +149,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-samples",    type=int, default=None, help="Limit samples for quick testing")
     parser.add_argument("--resolution",     default="high", choices=["high","medium","low"], help="A4 only")
     parser.add_argument("--embedding-dim",  type=int, default=64,  help="A5 only")
-    parser.add_argument("--vad-threshold",  type=float, default=15.0, help="A3 only")
+    parser.add_argument("--vad-threshold",  type=float, default=0.5, help="A3 only: Silero VAD speech probability threshold 0.0–1.0")
     parser.add_argument("--mixed",          action="store_true", help="Add background noise chunks labeled 'silence'")
     args = parser.parse_args()
 

@@ -5,17 +5,23 @@ import torchaudio.transforms as T
 N_MFCC = 13
 SAMPLE_RATE = 16000
 
-# ratio of peak frame energy to noise floor — relative to clip's own loudness,
-# so it works regardless of recording volume. 15 = peak must be 15x the noise floor.
-VAD_THRESHOLD = 15.0
+# load once at import time — small model, negligible overhead
+_vad_model, _vad_utils = torch.hub.load(
+    'snakers4/silero-vad', 'silero_vad', trust_repo=True, verbose=False
+)
+_get_speech_timestamps = _vad_utils[0]
+
+# threshold 0.0–1.0: speech probability above which a frame counts as speech
+VAD_THRESHOLD = 0.5
 
 
 def vad_triggered(waveform: torch.Tensor, threshold: float = VAD_THRESHOLD) -> bool:
-    frame_size = 400  # 25ms at 16kHz
-    frames = waveform.squeeze().unfold(0, frame_size, frame_size // 2)
-    energy = (frames ** 2).mean(dim=1)
-    noise_floor = max(torch.quantile(energy, 0.2).item(), 1e-8)
-    return bool((energy.max().item() / noise_floor) > threshold)
+    timestamps = _get_speech_timestamps(
+        waveform.squeeze(), _vad_model,
+        sampling_rate=SAMPLE_RATE,
+        threshold=threshold,
+    )
+    return len(timestamps) > 0
 
 
 def extract(waveform: torch.Tensor, threshold: float = VAD_THRESHOLD):
