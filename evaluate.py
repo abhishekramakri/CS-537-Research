@@ -10,16 +10,26 @@ PLOTS_DIR   = "plots"
 
 # display names for the result files
 APPROACH_LABELS = {
-    "a1":          "A1 Raw",
-    "a2":          "A2 Fixed MFCC",
-    "a3":          "A3 Event-Triggered",
-    "a4_high":     "A4 High Res",
-    "a4_medium":   "A4 Medium Res",
-    "a4_low":      "A4 Low Res",
-    "a5_dim16":    "A5 Embed (16)",
-    "a5_dim32":    "A5 Embed (32)",
-    "a5_dim64":    "A5 Embed (64)",
-    "a5_dim128":   "A5 Embed (128)",
+    "a1":               "A1 Raw",
+    "a2":               "A2 Fixed MFCC",
+    "a3":               "A3 Event-Triggered",
+    "a4_high":          "A4 High Res",
+    "a4_medium":        "A4 Medium Res",
+    "a4_low":           "A4 Low Res",
+    "a5_dim16":         "A5 Embed (16)",
+    "a5_dim32":         "A5 Embed (32)",
+    "a5_dim64":         "A5 Embed (64)",
+    "a5_dim128":        "A5 Embed (128)",
+    "a1_mixed":         "A1 Raw (mixed)",
+    "a2_mixed":         "A2 Fixed MFCC (mixed)",
+    "a3_mixed":         "A3 Event-Triggered (mixed)",
+    "a4_high_mixed":    "A4 High Res (mixed)",
+    "a4_medium_mixed":  "A4 Medium Res (mixed)",
+    "a4_low_mixed":     "A4 Low Res (mixed)",
+    "a5_dim16_mixed":   "A5 Embed 16 (mixed)",
+    "a5_dim32_mixed":   "A5 Embed 32 (mixed)",
+    "a5_dim64_mixed":   "A5 Embed 64 (mixed)",
+    "a5_dim128_mixed":  "A5 Embed 128 (mixed)",
 }
 
 
@@ -33,9 +43,9 @@ def compute_metrics(records):
     Returns a dict with accuracy, macro F1, avg bytes per utterance,
     avg RTT, and transmission rate.
 
-    Untransmitted A3 samples (transmitted=False) count as wrong predictions
-    for accuracy and F1 but contribute 0 bytes to the bandwidth average.
-    This gives a fair comparison — you can't get bandwidth savings for free.
+    VAD skips (predicted=None) on "silence" samples count as correct — the whole
+    point of event-triggered transmission is suppressing non-speech. Skips on real
+    keyword samples still count as wrong (missed detection).
     """
     true_labels, pred_labels = [], []
     bytes_list, rtt_list = [], []
@@ -43,8 +53,12 @@ def compute_metrics(records):
 
     for r in records:
         true_labels.append(r["true"])
-        # None prediction (VAD skip) treated as a wrong answer "_skipped"
-        pred_labels.append(r["predicted"] if r["predicted"] is not None else "_skipped")
+        if r["predicted"] is not None:
+            pred_labels.append(r["predicted"])
+        elif r["true"] == "silence":
+            pred_labels.append("silence")   # correct suppression
+        else:
+            pred_labels.append("_skipped")  # missed keyword
         bytes_list.append(r["bytes"])
         if r["transmitted"]:
             transmitted += 1

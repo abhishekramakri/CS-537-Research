@@ -55,14 +55,53 @@ python data/download.py
 Approach-specific flags:
 - A4: `--resolution [high|medium|low]`
 - A5: `--embedding-dim [16|32|64|128]`
-- A3: `--vad-threshold 0.02` (optional, default 0.02)
+- A3: `--vad-threshold 15.0` (optional, default 15.0 — ratio of peak to noise floor)
 - Add `--num-samples N` to run on a subset for quick testing
+
+**Full two-machine test (what to run for results):**
+
+Run these on the server machine, each in its own terminal (or kill between runs since they all use port 9999):
+```bash
+/usr/bin/python3 server.py --approach a1
+/usr/bin/python3 server.py --approach a2   # also used for a3
+/usr/bin/python3 server.py --approach a4
+/usr/bin/python3 server.py --approach a5 --embedding-dim 16
+/usr/bin/python3 server.py --approach a5 --embedding-dim 32
+/usr/bin/python3 server.py --approach a5 --embedding-dim 64
+/usr/bin/python3 server.py --approach a5 --embedding-dim 128
+```
+
+Run these on the device machine (replace `<server-ip>`). Run each pair together — start the matching server first, then run device:
+```bash
+# keywords-only (fair accuracy comparison)
+/usr/bin/python3 device.py --approach a1 --host <server-ip>
+/usr/bin/python3 device.py --approach a2 --host <server-ip>
+/usr/bin/python3 device.py --approach a3 --host <server-ip>
+/usr/bin/python3 device.py --approach a4 --resolution high   --host <server-ip>
+/usr/bin/python3 device.py --approach a4 --resolution medium --host <server-ip>
+/usr/bin/python3 device.py --approach a4 --resolution low    --host <server-ip>
+/usr/bin/python3 device.py --approach a5 --embedding-dim 16  --host <server-ip>
+/usr/bin/python3 device.py --approach a5 --embedding-dim 32  --host <server-ip>
+/usr/bin/python3 device.py --approach a5 --embedding-dim 64  --host <server-ip>
+/usr/bin/python3 device.py --approach a5 --embedding-dim 128 --host <server-ip>
+
+# mixed mode — adds ~400 background noise chunks to show A3's real advantage
+# run the same server commands above, just add --mixed to each device command
+/usr/bin/python3 device.py --approach a1 --host <server-ip> --mixed
+/usr/bin/python3 device.py --approach a2 --host <server-ip> --mixed
+/usr/bin/python3 device.py --approach a3 --host <server-ip> --mixed
+# ... same pattern for a4 and a5
+```
+
+Results are saved to `results/` as `<tag>.json` (e.g. `a2.json`, `a3_mixed.json`). Copy the whole `results/` folder back to one machine before evaluating.
 
 **Evaluation** (after running all approaches):
 ```bash
 /usr/bin/python3 evaluate.py
 ```
 Outputs a metrics table to terminal and saves plots to `plots/`.
+
+Two sets of results will appear — plain tags (keywords-only) and `_mixed` tags (with background noise). The mixed results show A3's bandwidth savings most clearly.
 
 ## Notes
 

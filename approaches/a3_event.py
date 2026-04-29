@@ -5,20 +5,17 @@ import torchaudio.transforms as T
 N_MFCC = 13
 SAMPLE_RATE = 16000
 
-# short-time energy threshold for VAD — tunable, lower = more sensitive
-VAD_THRESHOLD = 0.02
+# ratio of peak frame energy to noise floor — relative to clip's own loudness,
+# so it works regardless of recording volume. 15 = peak must be 15x the noise floor.
+VAD_THRESHOLD = 15.0
 
 
 def vad_triggered(waveform: torch.Tensor, threshold: float = VAD_THRESHOLD) -> bool:
-    """
-    Simple energy-based voice activity detection.
-    Splits the waveform into 25ms frames and checks if any frame
-    exceeds the energy threshold. Returns True if voice is detected.
-    """
     frame_size = 400  # 25ms at 16kHz
     frames = waveform.squeeze().unfold(0, frame_size, frame_size // 2)
     energy = (frames ** 2).mean(dim=1)
-    return bool(energy.max().item() > threshold)
+    noise_floor = max(torch.quantile(energy, 0.2).item(), 1e-8)
+    return bool((energy.max().item() / noise_floor) > threshold)
 
 
 def extract(waveform: torch.Tensor, threshold: float = VAD_THRESHOLD):

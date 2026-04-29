@@ -3,6 +3,7 @@ import struct
 import time
 import json
 import os
+import glob
 import argparse
 import torch
 import torchaudio
@@ -12,6 +13,20 @@ from models.encoder import Encoder
 from train import SpeechCommandsDataset, get_mfcc_transform, LABELS
 
 RESULTS_DIR = "results"
+BG_NOISE_DIR = os.path.join("data", "SpeechCommands", "speech_commands_v0.02", "_background_noise_")
+
+
+def load_background_noise():
+    samples = []
+    for wav_path in glob.glob(os.path.join(BG_NOISE_DIR, "*.wav")):
+        waveform, sr = torchaudio.load(wav_path)
+        if sr != 16000:
+            waveform = torchaudio.functional.resample(waveform, sr, 16000)
+        waveform = waveform.mean(0, keepdim=True)  # stereo → mono
+        n_chunks = waveform.shape[-1] // 16000
+        for j in range(n_chunks):
+            samples.append((waveform[:, j * 16000:(j + 1) * 16000], "silence"))
+    return samples
 
 
 def recv_exact(sock, n):
@@ -45,7 +60,7 @@ def send_payload(host, port, payload: bytes) -> tuple[int, float]:
     return predicted_idx, rtt
 
 
-def run(approach, host, port, num_samples, resolution, embedding_dim, vad_threshold):
+def run(approach, host, port, num_samples, resolution, embedding_dim, vad_threshold, mixed):
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     test_ds = torchaudio.datasets.SPEECHCOMMANDS("data", subset="testing", download=False)
@@ -57,21 +72,27 @@ def run(approach, host, port, num_samples, resolution, embedding_dim, vad_thresh
         encoder.load_state_dict(torch.load(ckpt, map_location="cpu"))
         encoder.eval()
 
-    records = []
     n = min(num_samples, len(test_ds)) if num_samples else len(test_ds)
 
-    print(f"Running approach {approach} against {host}:{port} on {n} samples")
-
+    # build sample list: (waveform, true_label)
+    samples = []
     for i in range(n):
         waveform, _, true_label, *_ = test_ds[i]
-
-        # pad/trim to 1 second
         if waveform.shape[-1] < 16000:
             waveform = torch.nn.functional.pad(waveform, (0, 16000 - waveform.shape[-1]))
         else:
             waveform = waveform[:, :16000]
+        samples.append((waveform, true_label))
 
-        # --- extract payload based on approach ---
+    if mixed:
+        bg_samples = load_background_noise()
+        samples += bg_samples
+        print(f"Mixed mode: {n} keyword samples + {len(bg_samples)} background noise chunks")
+
+    print(f"Running approach {approach} against {host}:{port} on {len(samples)} samples")
+
+    records = []
+    for i, (waveform, true_label) in enumerate(samples):
         if approach == "a1":
             payload = a1_raw.extract(waveform)
         elif approach == "a2":
@@ -83,7 +104,6 @@ def run(approach, host, port, num_samples, resolution, embedding_dim, vad_thresh
         elif approach == "a5":
             payload = a5_embedding.extract(waveform, encoder)
 
-        # A3 returns None when VAD doesn't trigger — skip transmission
         if payload is None:
             records.append({
                 "true": true_label,
@@ -92,6 +112,8 @@ def run(approach, host, port, num_samples, resolution, embedding_dim, vad_thresh
                 "rtt": None,
                 "transmitted": False,
             })
+            if (i + 1) % 100 == 0:
+                print(f"  {i + 1}/{len(samples)}")
             continue
 
         predicted_idx, rtt = send_payload(host, port, payload)
@@ -105,10 +127,12 @@ def run(approach, host, port, num_samples, resolution, embedding_dim, vad_thresh
         })
 
         if (i + 1) % 100 == 0:
-            print(f"  {i + 1}/{n}")
+            print(f"  {i + 1}/{len(samples)}")
 
     tag = approach if approach != "a4" else f"a4_{resolution}"
     tag = tag if approach != "a5" else f"a5_dim{embedding_dim}"
+    if mixed:
+        tag += "_mixed"
     out_path = os.path.join(RESULTS_DIR, f"{tag}.json")
 
     with open(out_path, "w") as f:
@@ -125,8 +149,9 @@ if __name__ == "__main__":
     parser.add_argument("--num-samples",    type=int, default=None, help="Limit samples for quick testing")
     parser.add_argument("--resolution",     default="high", choices=["high","medium","low"], help="A4 only")
     parser.add_argument("--embedding-dim",  type=int, default=64,  help="A5 only")
-    parser.add_argument("--vad-threshold",  type=float, default=0.02, help="A3 only")
+    parser.add_argument("--vad-threshold",  type=float, default=15.0, help="A3 only")
+    parser.add_argument("--mixed",          action="store_true", help="Add background noise chunks labeled 'silence'")
     args = parser.parse_args()
 
     run(args.approach, args.host, args.port, args.num_samples,
-        args.resolution, args.embedding_dim, args.vad_threshold)
+        args.resolution, args.embedding_dim, args.vad_threshold, args.mixed)
