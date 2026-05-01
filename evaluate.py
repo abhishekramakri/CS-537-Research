@@ -4,6 +4,9 @@ import glob
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import f1_score
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 RESULTS_DIR = "results"
 PLOTS_DIR   = "plots"
@@ -107,13 +110,12 @@ def plot_pareto(results):
 
     for tag, metrics in results.items():
         label = APPROACH_LABELS.get(tag, tag)
-        ax.scatter(metrics["avg_bytes"], metrics["accuracy"], s=80, zorder=3)
-        ax.annotate(label, (metrics["avg_bytes"], metrics["accuracy"]),
-                    textcoords="offset points", xytext=(6, 4), fontsize=8)
+        ax.scatter(metrics["avg_bytes"], metrics["accuracy"], s=80, zorder=3, label=label)
 
     ax.set_xlabel("Avg bytes per utterance")
     ax.set_ylabel("Accuracy")
     ax.set_title("Accuracy vs Bandwidth — all approaches")
+    ax.legend(fontsize=7, loc="lower right", framealpha=0.9)
     ax.grid(True, linestyle="--", alpha=0.5)
     plt.tight_layout()
     plt.savefig(os.path.join(PLOTS_DIR, "accuracy_vs_bandwidth.png"), dpi=150)
@@ -126,13 +128,12 @@ def plot_pareto(results):
         fig, ax = plt.subplots(figsize=(9, 5))
         for tag, metrics in rtt_results.items():
             label = APPROACH_LABELS.get(tag, tag)
-            ax.scatter(metrics["avg_rtt_ms"], metrics["accuracy"], s=80, zorder=3)
-            ax.annotate(label, (metrics["avg_rtt_ms"], metrics["accuracy"]),
-                        textcoords="offset points", xytext=(6, 4), fontsize=8)
+            ax.scatter(metrics["avg_rtt_ms"], metrics["accuracy"], s=80, zorder=3, label=label)
 
         ax.set_xlabel("Avg round-trip latency (ms)")
         ax.set_ylabel("Accuracy")
         ax.set_title("Accuracy vs Latency — all approaches")
+        ax.legend(fontsize=7, loc="lower right", framealpha=0.9)
         ax.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
         plt.savefig(os.path.join(PLOTS_DIR, "accuracy_vs_latency.png"), dpi=150)
@@ -275,6 +276,136 @@ def plot_pareto(results):
         print(f"Saved plots/a5_embedding_sweep.png")
 
 
+def plot_results_table(results):
+    os.makedirs(PLOTS_DIR, exist_ok=True)
+
+    row_order = [
+        "a1", "a2",
+        "a3", "a3_mixed",
+        "a4_high", "a4_medium", "a4_low",
+        "a5_dim16", "a5_dim32", "a5_dim64", "a5_dim128",
+    ]
+    rows = [t for t in row_order if t in results]
+
+    col_headers = ["Approach", "Accuracy", "Macro F1", "Avg Bytes", "Avg RTT (ms)", "TX Rate"]
+    table_data  = []
+    for tag in rows:
+        m = results[tag]
+        rtt = f"{m['avg_rtt_ms']:.1f}" if m["avg_rtt_ms"] is not None else "N/A"
+        table_data.append([
+            APPROACH_LABELS.get(tag, tag),
+            f"{m['accuracy']:.4f}",
+            f"{m['macro_f1']:.4f}",
+            f"{m['avg_bytes']:.0f}",
+            rtt,
+            f"{m['transmission_rate']:.2f}",
+        ])
+
+    fig, ax = plt.subplots(figsize=(13, 0.5 * len(rows) + 1.5))
+    ax.axis("off")
+
+    tbl = ax.table(
+        cellText=table_data,
+        colLabels=col_headers,
+        loc="center",
+        cellLoc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(10)
+    tbl.scale(1, 1.6)
+
+    # style header row
+    for col in range(len(col_headers)):
+        tbl[0, col].set_facecolor("#2c3e50")
+        tbl[0, col].set_text_props(color="white", fontweight="bold")
+
+    # alternating row colors + highlight approach column
+    group_colors = {
+        "a1": "#d6eaf8", "a2": "#d6eaf8",
+        "a3": "#d5f5e3", "a3_mixed": "#d5f5e3",
+        "a4_high": "#fdebd0", "a4_medium": "#fdebd0", "a4_low": "#fdebd0",
+        "a5_dim16": "#f9ebea", "a5_dim32": "#f9ebea",
+        "a5_dim64": "#f9ebea", "a5_dim128": "#f9ebea",
+    }
+    for row_idx, tag in enumerate(rows, start=1):
+        color = group_colors.get(tag, "#ffffff")
+        for col in range(len(col_headers)):
+            tbl[row_idx, col].set_facecolor(color)
+
+    plt.title("Bandwidth-Efficient Keyword Spotting — Results Summary", fontsize=12, fontweight="bold", pad=12)
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLOTS_DIR, "results_table.png"), dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved plots/results_table.png")
+
+
+def export_excel(results):
+    os.makedirs(PLOTS_DIR, exist_ok=True)
+
+    row_order = [
+        "a1", "a2",
+        "a3", "a3_mixed",
+        "a4_high", "a4_medium", "a4_low",
+        "a5_dim16", "a5_dim32", "a5_dim64", "a5_dim128",
+    ]
+    rows = [t for t in row_order if t in results]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Results"
+
+    headers = ["Approach", "Accuracy", "Macro F1", "Avg Bytes", "Avg RTT (ms)", "TX Rate"]
+    header_fill = PatternFill("solid", fgColor="2C3E50")
+    header_font = Font(color="FFFFFF", bold=True)
+    thin = Side(style="thin", color="CCCCCC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    group_colors = {
+        "a1": "D6EAF8", "a2": "D6EAF8",
+        "a3": "D5F5E3", "a3_mixed": "D5F5E3",
+        "a4_high": "FDEBD0", "a4_medium": "FDEBD0", "a4_low": "FDEBD0",
+        "a5_dim16": "F9EBEA", "a5_dim32": "F9EBEA",
+        "a5_dim64": "F9EBEA", "a5_dim128": "F9EBEA",
+    }
+
+    for row_idx, tag in enumerate(rows, start=2):
+        m = results[tag]
+        rtt = round(m["avg_rtt_ms"], 1) if m["avg_rtt_ms"] is not None else "N/A"
+        row_data = [
+            APPROACH_LABELS.get(tag, tag),
+            round(m["accuracy"], 4),
+            round(m["macro_f1"], 4),
+            int(m["avg_bytes"]),
+            rtt,
+            round(m["transmission_rate"], 2),
+        ]
+        fill = PatternFill("solid", fgColor=group_colors.get(tag, "FFFFFF"))
+        for col, val in enumerate(row_data, 1):
+            cell = ws.cell(row=row_idx, column=col, value=val)
+            cell.fill = fill
+            cell.alignment = Alignment(horizontal="center" if col > 1 else "left")
+            cell.border = border
+
+    # auto-fit column widths
+    for col in range(1, len(headers) + 1):
+        max_len = max(
+            len(str(ws.cell(row=r, column=col).value or ""))
+            for r in range(1, len(rows) + 2)
+        )
+        ws.column_dimensions[get_column_letter(col)].width = max_len + 4
+
+    out_path = "results.xlsx"
+    wb.save(out_path)
+    print(f"Saved {out_path}")
+
+
 def main():
     json_files = glob.glob(os.path.join(RESULTS_DIR, "*.json"))
     if not json_files:
@@ -291,6 +422,8 @@ def main():
 
     print_table(results)
     plot_pareto(results)
+    plot_results_table(results)
+    export_excel(results)
 
 
 if __name__ == "__main__":
