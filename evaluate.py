@@ -1,12 +1,17 @@
 import os
 import json
 import glob
+import math
 import numpy as np
 import matplotlib.pyplot as plt
+import torch
 from sklearn.metrics import f1_score
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+from models.cnn import KWSModel
+from models.encoder import Encoder, EmbeddingClassifier
 
 RESULTS_DIR = "results"
 PLOTS_DIR   = "plots"
@@ -87,8 +92,84 @@ def compute_metrics(records):
     }
 
 
-def print_table(results):
-    header = f"{'Approach':<25} {'Accuracy':>9} {'Macro F1':>10} {'Avg Bytes':>11} {'Avg RTT (ms)':>13} {'TX Rate':>8}"
+def compute_flops():
+    """
+    Returns {tag: {device_mflops, server_mflops}} for each approach.
+    Neural network FLOPs measured with thop; MFCC FLOPs estimated analytically.
+    """
+    try:
+        from thop import profile as thop_profile
+    except ImportError:
+        print("thop not installed — skipping FLOPs (pip install thop)")
+        return {}
+
+    # analytical MFCC FLOPs: STFT + mel filterbank + log + DCT
+    N_FRAMES, N_FFT, N_MELS = 101, 400, 40
+    def mfcc_mflops(n_mfcc):
+        per_frame = (5 * N_FFT * math.log2(N_FFT) +
+                     (N_FFT // 2 + 1) * N_MELS +
+                     N_MELS * n_mfcc)
+        return per_frame * N_FRAMES / 1e6
+
+    dev = "cpu"
+    dummy_mfcc = torch.zeros(1, 1, 40, 101)
+
+    kws = KWSModel(n_mfcc=40, n_classes=35)
+    kws.load_state_dict(torch.load("checkpoints/kws_model.pt", map_location=dev))
+    kws.eval()
+    kws_flops, _ = thop_profile(kws, inputs=(dummy_mfcc,), verbose=False)
+    kws_mflops = kws_flops / 1e6
+
+    # Silero VAD — JIT model, thop may not support it; fall back to 0 if it fails
+    vad_mflops = 0.0
+    try:
+        vad_model, _ = torch.hub.load(
+            'snakers4/silero-vad', 'silero_vad', trust_repo=True, verbose=False
+        )
+        dummy_vad = torch.zeros(16000)
+        vad_flops, _ = thop_profile(vad_model, inputs=(dummy_vad,), verbose=False)
+        vad_mflops = vad_flops / 1e6
+    except Exception:
+        pass
+
+    m40 = mfcc_mflops(40)
+    m13 = mfcc_mflops(13)
+
+    flops = {
+        "a1":        {"device_mflops": 0.0,              "server_mflops": round(m40 + kws_mflops, 3)},
+        "a2":        {"device_mflops": round(m40, 3),    "server_mflops": round(kws_mflops, 3)},
+        "a3":        {"device_mflops": round(vad_mflops + m13, 3), "server_mflops": round(kws_mflops, 3)},
+        "a3_mixed":  {"device_mflops": round(vad_mflops + m13, 3), "server_mflops": round(kws_mflops, 3)},
+        "a4_high":   {"device_mflops": round(m40, 3),    "server_mflops": round(kws_mflops, 3)},
+        "a4_medium": {"device_mflops": round(m40, 3),    "server_mflops": round(kws_mflops, 3)},
+        "a4_low":    {"device_mflops": round(m40, 3),    "server_mflops": round(kws_mflops, 3)},
+    }
+
+    for dim in [16, 32, 64, 128]:
+        enc_path = f"checkpoints/encoder_{dim}.pt"
+        cls_path = f"checkpoints/embedding_classifier_{dim}.pt"
+        if not (os.path.exists(enc_path) and os.path.exists(cls_path)):
+            continue
+        enc = Encoder(embedding_dim=dim)
+        enc.load_state_dict(torch.load(enc_path, map_location=dev))
+        enc.eval()
+        enc_flops, _ = thop_profile(enc, inputs=(dummy_mfcc,), verbose=False)
+
+        cls = EmbeddingClassifier(embedding_dim=dim, n_classes=35)
+        cls.load_state_dict(torch.load(cls_path, map_location=dev))
+        cls.eval()
+        cls_flops, _ = thop_profile(cls, inputs=(torch.zeros(1, dim),), verbose=False)
+
+        flops[f"a5_dim{dim}"] = {
+            "device_mflops": round(m40 + enc_flops / 1e6, 3),
+            "server_mflops": round(cls_flops / 1e6, 3),
+        }
+
+    return flops
+
+
+def print_table(results, flops=None):
+    header = f"{'Approach':<25} {'Accuracy':>9} {'Macro F1':>10} {'Avg Bytes':>11} {'Avg RTT (ms)':>13} {'TX Rate':>8} {'Dev MFLOPs':>12} {'Srv MFLOPs':>12}"
     print("\n" + header)
     print("-" * len(header))
 
@@ -99,7 +180,12 @@ def print_table(results):
         byt     = f"{metrics['avg_bytes']:.0f}"
         rtt     = f"{metrics['avg_rtt_ms']:.1f}" if metrics["avg_rtt_ms"] is not None else "N/A"
         tx_rate = f"{metrics['transmission_rate']:.2f}"
-        print(f"{label:<25} {acc:>9} {f1:>10} {byt:>11} {rtt:>13} {tx_rate:>8}")
+        if flops and tag in flops:
+            dev_mf = f"{flops[tag]['device_mflops']:.3f}"
+            srv_mf = f"{flops[tag]['server_mflops']:.3f}"
+        else:
+            dev_mf = srv_mf = "N/A"
+        print(f"{label:<25} {acc:>9} {f1:>10} {byt:>11} {rtt:>13} {tx_rate:>8} {dev_mf:>12} {srv_mf:>12}")
 
 
 def plot_pareto(results):
@@ -276,7 +362,7 @@ def plot_pareto(results):
         print(f"Saved plots/a5_embedding_sweep.png")
 
 
-def plot_results_table(results):
+def plot_results_table(results, flops=None):
     os.makedirs(PLOTS_DIR, exist_ok=True)
 
     row_order = [
@@ -287,11 +373,16 @@ def plot_results_table(results):
     ]
     rows = [t for t in row_order if t in results]
 
-    col_headers = ["Approach", "Accuracy", "Macro F1", "Avg Bytes", "Avg RTT (ms)", "TX Rate"]
+    col_headers = ["Approach", "Accuracy", "Macro F1", "Avg Bytes", "Avg RTT (ms)", "TX Rate", "Dev MFLOPs", "Srv MFLOPs"]
     table_data  = []
     for tag in rows:
         m = results[tag]
         rtt = f"{m['avg_rtt_ms']:.1f}" if m["avg_rtt_ms"] is not None else "N/A"
+        if flops and tag in flops:
+            dev_mf = f"{flops[tag]['device_mflops']:.3f}"
+            srv_mf = f"{flops[tag]['server_mflops']:.3f}"
+        else:
+            dev_mf = srv_mf = "N/A"
         table_data.append([
             APPROACH_LABELS.get(tag, tag),
             f"{m['accuracy']:.4f}",
@@ -299,9 +390,11 @@ def plot_results_table(results):
             f"{m['avg_bytes']:.0f}",
             rtt,
             f"{m['transmission_rate']:.2f}",
+            dev_mf,
+            srv_mf,
         ])
 
-    fig, ax = plt.subplots(figsize=(13, 0.5 * len(rows) + 1.5))
+    fig, ax = plt.subplots(figsize=(17, 0.5 * len(rows) + 1.5))
     ax.axis("off")
 
     tbl = ax.table(
@@ -339,7 +432,7 @@ def plot_results_table(results):
     print(f"Saved plots/results_table.png")
 
 
-def export_excel(results):
+def export_excel(results, flops=None):
     os.makedirs(PLOTS_DIR, exist_ok=True)
 
     row_order = [
@@ -354,7 +447,7 @@ def export_excel(results):
     ws = wb.active
     ws.title = "Results"
 
-    headers = ["Approach", "Accuracy", "Macro F1", "Avg Bytes", "Avg RTT (ms)", "TX Rate"]
+    headers = ["Approach", "Accuracy", "Macro F1", "Avg Bytes", "Avg RTT (ms)", "TX Rate", "Dev MFLOPs", "Srv MFLOPs"]
     header_fill = PatternFill("solid", fgColor="2C3E50")
     header_font = Font(color="FFFFFF", bold=True)
     thin = Side(style="thin", color="CCCCCC")
@@ -378,6 +471,8 @@ def export_excel(results):
     for row_idx, tag in enumerate(rows, start=2):
         m = results[tag]
         rtt = round(m["avg_rtt_ms"], 1) if m["avg_rtt_ms"] is not None else "N/A"
+        dev_mf = flops[tag]["device_mflops"] if (flops and tag in flops) else "N/A"
+        srv_mf = flops[tag]["server_mflops"] if (flops and tag in flops) else "N/A"
         row_data = [
             APPROACH_LABELS.get(tag, tag),
             round(m["accuracy"], 4),
@@ -385,6 +480,8 @@ def export_excel(results):
             int(m["avg_bytes"]),
             rtt,
             round(m["transmission_rate"], 2),
+            dev_mf,
+            srv_mf,
         ]
         fill = PatternFill("solid", fgColor=group_colors.get(tag, "FFFFFF"))
         for col, val in enumerate(row_data, 1):
@@ -420,10 +517,13 @@ def main():
         results[tag] = compute_metrics(records)
         print(f"Loaded {tag}: {len(records)} samples")
 
-    print_table(results)
+    print("Computing MFLOPs...")
+    flops = compute_flops()
+
+    print_table(results, flops)
     plot_pareto(results)
-    plot_results_table(results)
-    export_excel(results)
+    plot_results_table(results, flops)
+    export_excel(results, flops)
 
 
 if __name__ == "__main__":
